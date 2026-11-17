@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVoice — Open-Source Voice Studio on publik</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <header>
+        <div class="brand">
+          <h1>OpenVoice</h1>
+          <p>Free, open-source speech studio built on publik — no paywalls or character limits</p>
+        </div>
+        <div class="row">
+          <span id="api-badge" class="badge">Connecting...</span>
+          <span id="llm-badge" class="badge">publik LLM: ...</span>
+        </div>
+      </header>
+
+      <nav class="tabs" id="tabs">
+        <button data-tab="studio" class="active">Studio (TTS)</button>
+        <button data-tab="design">Voice Design</button>
+        <button data-tab="clone">Voice Cloning</button>
+        <button data-tab="agent">Voice Agent</button>
+        <button data-tab="history">History &amp; Watermark</button>
+        <button data-tab="api">API</button>
+      </nav>
+
+      <section id="tab-studio" class="tab-panel">
+        <div class="card">
+          <h2>Text to Speech</h2>
+          <div class="row" style="margin-bottom: 12px">
+            <div class="col">
+              <label for="voice-select">Voice (Kokoro standard &amp; Chatterbox expressive)</label>
+              <select id="voice-select"></select>
+            </div>
+            <div style="width: 160px">
+              <label for="speed-range">Speed: <span id="speed-val">1.0</span>x</label>
+              <input id="speed-range" type="range" min="0.7" max="1.4" step="0.05" value="1.0" />
+            </div>
+          </div>
+
+          <label for="tts-text">Script (no character limit)</label>
+          <textarea id="tts-text">Welcome to OpenVoice. Free, open-source speech built on publik.</textarea>
+
+          <div class="row" style="margin-top: 12px">
+            <button id="btn-generate" class="primary">Generate Speech</button>
+            <button id="btn-direct" class="secondary">Auto-Direction</button>
+            <div class="row" style="gap: 6px">
+              <select id="translate-lang" style="width: 130px">
+                <option>Spanish</option>
+                <option>French</option>
+                <option>Japanese</option>
+                <option>German</option>
+              </select>
+              <button id="btn-translate" class="secondary">Translate</button>
+            </div>
+          </div>
+
+          <p id="studio-status" class="status"></p>
+          <audio id="studio-audio" controls class="hidden" style="width: 100%; margin-top: 12px"></audio>
+        </div>
+
+        <div class="card">
+          <h3>Write It For Me</h3>
+          <div class="row">
+            <div class="col">
+              <input id="write-topic" type="text" placeholder="Enter a topic (e.g. why open-source voice AI matters)" />
+            </div>
+            <button id="btn-write" class="secondary">Write &amp; Voice in One Click</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-design" class="tab-panel hidden">
+        <div class="card">
+          <h2>Voice Design from Description</h2>
+          <label for="design-prompt">Describe the voice you want</label>
+          <div class="row" style="margin-bottom: 14px">
+            <div class="col">
+              <input id="design-prompt" type="text" value="raspy old cowboy, slow and warm" />
+            </div>
+            <button id="btn-design" class="primary">Design Voice</button>
+          </div>
+          <p id="design-status" class="status"></p>
+          <div id="design-results"></div>
+          <audio id="design-audio" controls class="hidden" style="width: 100%; margin-top: 8px"></audio>
+        </div>
+      </section>
+
+      <section id="tab-clone" class="tab-panel hidden">
+        <div class="card">
+          <h2>Voice Cloning (Chatterbox MIT)</h2>
+          <p class="status">
+            Safety policy: cloning requires a ~10s reference clip AND a separate consent recording from the speaker.
+          </p>
+          <form id="clone-form">
+            <div style="margin-bottom: 12px">
+              <label for="clone-name">Voice Name</label>
+              <input id="clone-name" type="text" required />
+            </div>
+            <div class="row" style="margin-bottom: 12px">
+              <div class="col">
+                <label for="clone-sample">Reference Audio (~10s WAV/MP3)</label>
+                <input id="clone-sample" type="file" accept="audio/*" required />
+              </div>
+              <div class="col">
+                <label for="clone-consent">Consent Recording ("I consent to cloning my voice on OpenVoice")</label>
+                <input id="clone-consent" type="file" accept="audio/*" required />
+              </div>
+            </div>
+            <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px">
+              <input id="clone-confirm" type="checkbox" />
+              I confirm this is my own voice or I have recorded explicit consent.
+            </label>
+            <button type="submit" class="primary">Clone &amp; Save Voice</button>
+          </form>
+          <p id="clone-status" class="status"></p>
+        </div>
+      </section>
+
+      <section id="tab-agent" class="tab-panel hidden">
+        <div class="card">
+          <h2>Voice Agent (STT &rarr; LLM &rarr; TTS)</h2>
+          <div style="margin-bottom: 12px">
+            <label for="agent-prompt">System Prompt</label>
+            <input id="agent-prompt" type="text" value="You are a friendly OpenVoice assistant." />
+          </div>
+          <form id="agent-form" class="row" style="margin-bottom: 16px">
+            <div class="col">
+              <input id="agent-input" type="text" placeholder="Say or type something to your voice agent..." />
+            </div>
+            <button type="button" id="btn-stt" class="secondary">Mic (STT)</button>
+            <button type="submit" class="primary">Send</button>
+          </form>
+          <div id="agent-log"></div>
+        </div>
+      </section>
+
+      <section id="tab-history" class="tab-panel hidden">
+        <div class="card">
+          <h2>Verify Invisible Watermark</h2>
+          <input id="verify-file" type="file" accept=".wav,audio/wav" />
+          <pre id="verify-result" class="hidden" style="margin-top: 12px"></pre>
+        </div>
+        <div class="card">
+          <h2>Saved Audio History (<span id="history-count">0</span>)</h2>
+          <div id="history-list"></div>
+        </div>
+      </section>
+
+      <section id="tab-api" class="tab-panel hidden">
+        <div class="card">
+          <h2>OpenVoice Developer API</h2>
+          <p class="status">Use these endpoints from any publik app or external script.</p>
+          <pre>curl -X POST http://localhost:3001/api/tts \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello from publik!","voiceId":"af_heart","format":"wav"}' \
+  --output speech.wav</pre>
+          <pre>GET  /api/voices           # List Kokoro, Chatterbox &amp; cloned voices
+POST /api/tts              # Synthesize &amp; watermark speech
+POST /api/voices/design    # LLM voice design -&gt; 3 variations
+POST /api/voices/clone     # Clone voice (requires sampleAudio + consentAudio)
+POST /api/llm/direct       # Add pauses &amp; emotion tags
+POST /api/llm/write        # Topic -&gt; script
+POST /api/llm/translate    # Translate script
+POST /api/agent/turn       # STT -&gt; LLM -&gt; TTS turn
+POST /api/watermark/verify # Verify invisible OpenVoice WAV watermark</pre>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
