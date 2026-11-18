@@ -2,15 +2,19 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createStore } from './store.js';
 import { designVoice, autoDirect, writeScript, translateText, agentReply, isPublikConfigured } from './llm.js';
 import { ensureSignedIn, setChoice } from './publik.js';
-import { synthesizeSpeech } from './tts.js';
+import { getSpeechReadiness, resolvePythonBin, synthesizeSpeech } from './tts.js';
 import { embedWatermark, extractWatermark } from './watermark.js';
+import { CONSENT_PHRASE, matchConsentPhrase } from './consent.js';
+import { transcribeFile } from './stt.js';
+import { writeUploadAsWav } from './audio-file.js';
 
-export function createApp({ dataDir } = {}) {
+export function createApp({ dataDir, transcribeAudio, pythonBin } = {}) {
   const app = express();
   const store = createStore(dataDir);
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -18,16 +22,21 @@ export function createApp({ dataDir } = {}) {
   app.use(cors());
   app.use(express.json({ limit: '2mb' }));
 
-  app.get('/api/health', (_req, res) => {
+  const transcribe = transcribeAudio || ((filePath) => transcribeFile(filePath, { pythonBin }));
+
+  app.get('/api/health', async (_req, res) => {
+    const tts = await getSpeechReadiness(pythonBin);
     res.json({
       ok: true,
       service: 'openvoice',
       publikLlmConfigured: isPublikConfigured(),
+      consentPhrase: CONSENT_PHRASE,
+      tts,
     });
   });
 
   app.get('/api/voices', (_req, res) => {
-    res.json({ voices: store.listVoices() });
+    res.json({ voices: store.listVoices(), consentPhrase: CONSENT_PHRASE });
   });
 
   app.post('/api/voices', (req, res) => {
@@ -62,8 +71,8 @@ export function createApp({ dataDir } = {}) {
       { name: 'sampleAudio', maxCount: 1 },
       { name: 'consentAudio', maxCount: 1 },
     ]),
-    (req, res) => {
-      const { name, consentConfirmed, consentPhrase } = req.body || {};
+    async (req, res) => {
+      const { name, consentConfirmed } = req.body || {};
       const sampleFile = req.files?.sampleAudio?.[0];
       const consentFile = req.files?.consentAudio?.[0];
 
@@ -79,25 +88,47 @@ export function createApp({ dataDir } = {}) {
         });
       }
 
-      const id = `clone_${crypto.randomBytes(5).toString('hex')}`;
-      const samplePath = path.join(store.voicesDir, `${id}_sample.wav`);
-      const consentPath = path.join(store.voicesDir, `${id}_consent.wav`);
-      fs.writeFileSync(samplePath, sampleFile.buffer);
-      fs.writeFileSync(consentPath, consentFile.buffer);
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'openvoice-clone-'));
+      try {
+        const sampleTmp = writeUploadAsWav(sampleFile.buffer, path.join(tmp, 'sample.wav'), { sampleRate: 24000 });
+        const consentTmp = writeUploadAsWav(consentFile.buffer, path.join(tmp, 'consent.wav'), { sampleRate: 16000 });
+        let transcript = '';
+        try {
+          transcript = await transcribe(consentTmp);
+        } catch (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        const match = matchConsentPhrase(transcript, CONSENT_PHRASE);
+        if (!match.ok) {
+          const heard = transcript.trim() || '(no speech recognized)';
+          return res.status(400).json({
+            error: `${match.reason} Say exactly: “${CONSENT_PHRASE}”. Heard: “${heard}”.`,
+          });
+        }
 
-      const voice = store.addVoice({
-        id,
-        name: String(name).trim(),
-        engine: 'chatterbox',
-        type: 'cloned',
-        description: 'Cloned voice with verified consent recording',
-        samplePath,
-        consentPath,
-        consentPhrase: consentPhrase || 'I consent to cloning my voice on OpenVoice',
-        tags: ['cloned', 'chatterbox', 'consent-verified'],
-      });
+        const id = `clone_${crypto.randomBytes(5).toString('hex')}`;
+        const samplePath = path.join(store.voicesDir, `${id}_sample.wav`);
+        const consentPath = path.join(store.voicesDir, `${id}_consent.wav`);
+        fs.copyFileSync(sampleTmp, samplePath);
+        fs.copyFileSync(consentTmp, consentPath);
 
-      res.status(201).json({ voice });
+        const voice = store.addVoice({
+          id,
+          name: String(name).trim(),
+          engine: 'chatterbox',
+          type: 'cloned',
+          description: 'Cloned voice with a consent recording that matches the required phrase',
+          samplePath,
+          consentPath,
+          consentPhrase: CONSENT_PHRASE,
+          tags: ['cloned', 'chatterbox', 'consent-verified'],
+        });
+        res.status(201).json({ voice });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
     },
   );
 
@@ -117,6 +148,7 @@ export function createApp({ dataDir } = {}) {
         voice,
         speed: Number(speed) || 1.0,
         generationId,
+        pythonBin,
       });
 
       const entry = store.addHistory(
@@ -219,33 +251,38 @@ export function createApp({ dataDir } = {}) {
     const { transcript, systemPrompt, voiceId = 'af_heart' } = req.body || {};
     if (!transcript) return res.status(400).json({ error: 'transcript is required' });
 
-    const llmResult = await agentReply(transcript, systemPrompt);
-    const voice = store.getVoice(voiceId) || { id: voiceId, name: voiceId, engine: 'kokoro' };
-    const generationId = crypto.randomBytes(6).toString('hex');
-    const { wav, mode, engine } = await synthesizeSpeech({
-      text: llmResult.reply,
-      voice,
-      generationId,
-    });
-    const entry = store.addHistory(
-      {
-        id: generationId,
+    try {
+      const llmResult = await agentReply(transcript, systemPrompt);
+      const voice = store.getVoice(voiceId) || { id: voiceId, name: voiceId, engine: 'kokoro' };
+      const generationId = crypto.randomBytes(6).toString('hex');
+      const { wav, mode, engine } = await synthesizeSpeech({
         text: llmResult.reply,
-        voiceId: voice.id,
-        voiceName: voice.name,
-        engine,
-        mode,
-        watermarked: true,
-        source: 'voice-agent',
-      },
-      wav,
-    );
+        voice,
+        generationId,
+        pythonBin,
+      });
+      const entry = store.addHistory(
+        {
+          id: generationId,
+          text: llmResult.reply,
+          voiceId: voice.id,
+          voiceName: voice.name,
+          engine,
+          mode,
+          watermarked: true,
+          source: 'voice-agent',
+        },
+        wav,
+      );
 
-    res.json({
-      ...llmResult,
-      entry,
-      audioUrl: `/api/history/${entry.id}/audio`,
-    });
+      res.json({
+        ...llmResult,
+        entry,
+        audioUrl: `/api/history/${entry.id}/audio`,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post('/api/provider/choice', (req, res) => {
@@ -279,5 +316,6 @@ if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || proce
   const app = createApp();
   app.listen(port, () => {
     console.log(`OpenVoice API listening on http://localhost:${port}`);
+    console.log(`OpenVoice TTS python: ${resolvePythonBin()}`);
   });
 }

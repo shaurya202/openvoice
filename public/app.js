@@ -1,3 +1,5 @@
+import { KOKORO_BROWSER_MODULE, KOKORO_MODEL_ID, selectKokoroDevice } from './kokoro-device.js';
+
 const $ = (id) => document.getElementById(id);
 
 const state = { voices: [], history: [] };
@@ -25,6 +27,10 @@ async function refreshData() {
   $('api-badge').textContent = h.ok ? 'API Online' : 'Offline';
   $('api-badge').classList.toggle('ok', Boolean(h.ok));
   $('llm-badge').textContent = `publik LLM: ${h.publikLlmConfigured ? 'Connected' : 'Local Fallback'}`;
+  const ttsReady = Boolean(h.tts?.kokoro);
+  $('tts-badge').textContent = ttsReady ? 'Kokoro: ready' : 'Kokoro: setup needed';
+  $('tts-badge').classList.toggle('ok', ttsReady);
+  if (v.consentPhrase) $('consent-phrase').textContent = v.consentPhrase;
 
   state.voices = v.voices || [];
   state.history = hist.history || [];
@@ -96,13 +102,24 @@ function escapeHtml(str) {
 
 let kokoroPromise = null;
 
+async function loadKokoro(device, onStatus) {
+  onStatus?.(`Loading Kokoro model in browser (${device}; first run downloads the model)...`);
+  const { KokoroTTS } = await import(KOKORO_BROWSER_MODULE);
+  const dtype = device === 'webgpu' ? 'fp32' : 'q8';
+  return KokoroTTS.from_pretrained(KOKORO_MODEL_ID, { dtype, device });
+}
+
 async function getKokoro(onStatus) {
   if (!kokoroPromise) {
     kokoroPromise = (async () => {
-      onStatus?.('Loading Kokoro model in browser (first run ~80MB)...');
-      const { KokoroTTS } = await import('https://esm.sh/kokoro-js@1.2.1');
-      const device = navigator.gpu ? 'webgpu' : 'wasm';
-      return KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', { dtype: 'q8', device });
+      const device = await selectKokoroDevice();
+      try {
+        return await loadKokoro(device, onStatus);
+      } catch (err) {
+        if (device !== 'webgpu') throw err;
+        onStatus?.(`WebGPU failed (${err.message}). Retrying with WASM...`);
+        return loadKokoro('wasm', onStatus);
+      }
     })().catch((err) => {
       kokoroPromise = null;
       throw err;
@@ -140,14 +157,22 @@ async function synthesizeWithFallback({ text, voiceId, speed, onStatus }) {
   const voice = state.voices.find((v) => v.id === voiceId);
   const engine = voice?.engine || 'kokoro';
 
+  const browserErrors = [];
   if (engine === 'kokoro') {
     try {
       const tts = await getKokoro(onStatus);
       onStatus?.('Synthesizing speech in browser (Kokoro)...');
       const kokoroVoice = voice?.blend?.[0]?.voiceId || voiceId;
       const raw = await tts.generate(text, { voice: kokoroVoice, speed });
-      const wavBlob = encodePcm16Wav(raw.audio, raw.sampling_rate || 24000);
-      onStatus?.('Watermarking & saving to history...');
+      const samples = raw?.audio;
+      if (!samples || typeof samples.length !== 'number' || samples.length < 1000) {
+        throw new Error('Browser Kokoro returned no speech audio.');
+      }
+      let peak = 0;
+      for (let i = 0; i < samples.length; i += 16) peak = Math.max(peak, Math.abs(samples[i]));
+      if (peak < 1e-4) throw new Error('Browser Kokoro returned silence instead of speech.');
+      const wavBlob = encodePcm16Wav(samples, raw.sampling_rate || 24000);
+      onStatus?.('Watermarking and saving to history...');
       const form = new FormData();
       form.append('audio', wavBlob, 'kokoro.wav');
       form.append('text', text);
@@ -155,11 +180,13 @@ async function synthesizeWithFallback({ text, voiceId, speed, onStatus }) {
       form.append('voiceName', voice?.name || voiceId);
       form.append('engine', 'kokoro');
       const res = await fetch('/api/history/upload', { method: 'POST', body: form });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Upload failed');
       return data;
     } catch (err) {
-      onStatus?.(`Browser Kokoro unavailable (${err.message}); falling back to server...`);
+      const message = err?.message || String(err);
+      browserErrors.push(`Browser Kokoro: ${message}`);
+      onStatus?.(`Browser Kokoro failed (${message}). Trying the server...`);
     }
   }
 
@@ -168,8 +195,14 @@ async function synthesizeWithFallback({ text, voiceId, speed, onStatus }) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, voiceId, speed }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Generation failed');
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const serverError = data.error || 'Generation failed';
+    throw new Error(browserErrors.length ? `${browserErrors.join(' ')} Server: ${serverError}` : serverError);
+  }
+  if (data.entry?.mode === 'fallback') {
+    throw new Error('The server returned a placeholder tone instead of speech.');
+  }
   return data;
 }
 
@@ -266,18 +299,22 @@ $('btn-design').addEventListener('click', async () => {
     preview.className = 'secondary';
     preview.textContent = 'Preview';
     preview.onclick = async () => {
-      const d = await synthesizeWithFallback({
-        text: v.sampleLine,
-        voiceId: v.voiceId,
-        speed: v.speed,
-        onStatus: (msg) => { $('design-status').textContent = msg; },
-      });
-      if (d.audioUrl) {
-        const audio = $('design-audio');
-        audio.src = d.audioUrl;
-        audio.classList.remove('hidden');
-        audio.play().catch(() => {});
-        await refreshData();
+      try {
+        const d = await synthesizeWithFallback({
+          text: v.sampleLine,
+          voiceId: v.voiceId,
+          speed: v.speed,
+          onStatus: (msg) => { $('design-status').textContent = msg; },
+        });
+        if (d.audioUrl) {
+          const audio = $('design-audio');
+          audio.src = d.audioUrl;
+          audio.classList.remove('hidden');
+          audio.play().catch(() => {});
+          await refreshData();
+        }
+      } catch (err) {
+        $('design-status').textContent = `Error: ${err.message}`;
       }
     };
 
@@ -344,6 +381,13 @@ $('agent-form').addEventListener('submit', async (e) => {
     }),
   });
   const data = await res.json();
+  if (!res.ok) {
+    const card = document.createElement('div');
+    card.className = 'list-item';
+    card.textContent = `Error: ${data.error || 'Agent failed'}`;
+    $('agent-log').appendChild(card);
+    return;
+  }
   const card = document.createElement('div');
   card.className = 'list-item';
   card.style.display = 'block';

@@ -1,0 +1,16 @@
+# Speech stack for the OpenVoice Python worker.
+# Install with: bash scripts/setup-python.sh
+# Python 3.9+ and the system packages espeak-ng and ffmpeg are also required.
+# Chatterbox pins torch 2.6. The default PyPI wheel is used so the version matches exactly.
+
+numpy>=1.24,<2
+# resemble-perth imports pkg_resources, which setuptools 81+ no longer ships.
+setuptools>=69,<81
+torch==2.6.0
+torchaudio==2.6.0
+soundfile>=0.12
+# faster-whisper 1.2 passes metadata_errors to av.open; PyAV 16+ removed that argument.
+av>=13,<16
+kokoro==0.9.4
+faster-whisper==1.2.1
+chatterbox-tts==0.1.7
