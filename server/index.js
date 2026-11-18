@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { createStore } from './store.js';
 import { designVoice, autoDirect, writeScript, translateText, agentReply, isPublikConfigured } from './llm.js';
+import { ensureSignedIn, setChoice } from './publik.js';
 import { synthesizeSpeech } from './tts.js';
 import { embedWatermark, extractWatermark } from './watermark.js';
 
@@ -247,6 +248,15 @@ export function createApp({ dataDir } = {}) {
     });
   });
 
+  app.post('/api/provider/choice', (req, res) => {
+    const { choice } = req.body || {};
+    if (choice !== 'publik' && choice !== 'own_key' && choice !== null) {
+      return res.status(400).json({ error: 'choice must be "publik", "own_key", or null' });
+    }
+    setChoice(choice);
+    res.json({ ok: true, choice });
+  });
+
   app.post('/api/watermark/verify', upload.single('audio'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio file is required' });
     res.json(extractWatermark(req.file.buffer));
@@ -264,6 +274,7 @@ export function createApp({ dataDir } = {}) {
 }
 
 if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || process.argv[1]?.endsWith('server\\index.js') || process.argv[1]?.endsWith('server/index.js')) {
+  await ensureSignedIn();
   const port = Number(process.env.PORT) || 3001;
   const app = createApp();
   app.listen(port, () => {
