@@ -94,21 +94,95 @@ function escapeHtml(str) {
     .replaceAll('>', '&gt;');
 }
 
+let kokoroPromise = null;
+
+async function getKokoro(onStatus) {
+  if (!kokoroPromise) {
+    kokoroPromise = (async () => {
+      onStatus?.('Loading Kokoro model in browser (first run ~80MB)...');
+      const { KokoroTTS } = await import('https://esm.sh/kokoro-js@1.2.1');
+      const device = navigator.gpu ? 'webgpu' : 'wasm';
+      return KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', { dtype: 'q8', device });
+    })().catch((err) => {
+      kokoroPromise = null;
+      throw err;
+    });
+  }
+  return kokoroPromise;
+}
+
+function encodePcm16Wav(samples, sampleRate = 24000) {
+  const dataSize = samples.length * 2;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buf);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function synthesizeWithFallback({ text, voiceId, speed, onStatus }) {
+  const voice = state.voices.find((v) => v.id === voiceId);
+  const engine = voice?.engine || 'kokoro';
+
+  if (engine === 'kokoro') {
+    try {
+      const tts = await getKokoro(onStatus);
+      onStatus?.('Synthesizing speech in browser (Kokoro)...');
+      const kokoroVoice = voice?.blend?.[0]?.voiceId || voiceId;
+      const raw = await tts.generate(text, { voice: kokoroVoice, speed });
+      const wavBlob = encodePcm16Wav(raw.audio, raw.sampling_rate || 24000);
+      onStatus?.('Watermarking & saving to history...');
+      const form = new FormData();
+      form.append('audio', wavBlob, 'kokoro.wav');
+      form.append('text', text);
+      form.append('voiceId', voiceId);
+      form.append('voiceName', voice?.name || voiceId);
+      form.append('engine', 'kokoro');
+      const res = await fetch('/api/history/upload', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      return data;
+    } catch (err) {
+      onStatus?.(`Browser Kokoro unavailable (${err.message}); falling back to server...`);
+    }
+  }
+
+  const res = await fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voiceId, speed }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Generation failed');
+  return data;
+}
+
 async function generateSpeech(overrideText, overrideVoiceId, overrideSpeed) {
   $('btn-generate').disabled = true;
-  $('studio-status').textContent = 'Generating watermarked speech...';
+  $('studio-status').textContent = 'Starting synthesis...';
   try {
-    const res = await fetch('/api/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: overrideText ?? $('tts-text').value,
-        voiceId: overrideVoiceId ?? $('voice-select').value,
-        speed: overrideSpeed ?? Number($('speed-range').value),
-      }),
+    const data = await synthesizeWithFallback({
+      text: overrideText ?? $('tts-text').value,
+      voiceId: overrideVoiceId ?? $('voice-select').value,
+      speed: overrideSpeed ?? Number($('speed-range').value),
+      onStatus: (msg) => { $('studio-status').textContent = msg; },
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Generation failed');
     const audio = $('studio-audio');
     audio.src = data.audioUrl;
     audio.classList.remove('hidden');
@@ -192,17 +266,18 @@ $('btn-design').addEventListener('click', async () => {
     preview.className = 'secondary';
     preview.textContent = 'Preview';
     preview.onclick = async () => {
-      const r = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: v.sampleLine, voiceId: v.voiceId, speed: v.speed }),
+      const d = await synthesizeWithFallback({
+        text: v.sampleLine,
+        voiceId: v.voiceId,
+        speed: v.speed,
+        onStatus: (msg) => { $('design-status').textContent = msg; },
       });
-      const d = await r.json();
       if (d.audioUrl) {
         const audio = $('design-audio');
         audio.src = d.audioUrl;
         audio.classList.remove('hidden');
         audio.play().catch(() => {});
+        await refreshData();
       }
     };
 
