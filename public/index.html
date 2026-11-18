@@ -16,6 +16,7 @@
         <div class="row">
           <span id="api-badge" class="badge">Connecting...</span>
           <span id="llm-badge" class="badge">publik LLM: ...</span>
+          <span id="tts-badge" class="badge">Kokoro: ...</span>
         </div>
       </header>
 
@@ -94,8 +95,11 @@
         <div class="card">
           <h2>Voice Cloning (Chatterbox MIT)</h2>
           <p class="status">
-            Safety policy: cloning requires a ~10s reference clip AND a separate consent recording from the speaker.
+            Cloning needs a reference clip and a separate recording of the speaker saying the consent phrase.
+            The recording is transcribed locally and must match. The checkbox alone is not enough.
           </p>
+          <p class="status">Say this phrase in the consent recording:</p>
+          <p id="consent-phrase" style="margin-top: 0"><strong>I consent to cloning my voice on OpenVoice</strong></p>
           <form id="clone-form">
             <div style="margin-bottom: 12px">
               <label for="clone-name">Voice Name</label>
@@ -107,7 +111,7 @@
                 <input id="clone-sample" type="file" accept="audio/*" required />
               </div>
               <div class="col">
-                <label for="clone-consent">Consent Recording ("I consent to cloning my voice on OpenVoice")</label>
+                <label for="clone-consent">Consent recording of the phrase above</label>
                 <input id="clone-consent" type="file" accept="audio/*" required />
               </div>
             </div>
@@ -162,7 +166,7 @@
           <pre>GET  /api/voices           # List Kokoro, Chatterbox &amp; cloned voices
 POST /api/tts              # Synthesize &amp; watermark speech
 POST /api/voices/design    # LLM voice design -&gt; 3 variations
-POST /api/voices/clone     # Clone voice (requires sampleAudio + consentAudio)
+POST /api/voices/clone     # Clone voice (sampleAudio + consentAudio of the consent phrase)
 POST /api/llm/direct       # Add pauses &amp; emotion tags
 POST /api/llm/write        # Topic -&gt; script
 POST /api/llm/translate    # Translate script
